@@ -277,7 +277,7 @@ async def pdog_generate(
     wait_seconds: float = 0.0,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Pdog 文生图（GPT Image 2.5，默认模型 flare）。立即返回 job_id，图像在后台生成
+    """Pdog 文生图（模型由配置的路由决定）。立即返回 job_id，图像在后台生成
     （约 20-120s），用 pdog_task_status(job_id) 轮询直到完成，切勿重复提交。
 
     档位：默认 1K（2048x1152，约 ¥0.02/张）；4K（如 3840x2160，约 ¥0.08/张）仅在用户
@@ -285,6 +285,8 @@ async def pdog_generate(
     1:1 1024x1024、2:3 1024x1536。
     透明背景：background='transparent'（默认要求原生 Alpha，上游无透明像素会判失败；
     色键回退需用户显式接受后用 transparent_strategy='chroma-key'）。
+    多路由：主路由在未计费的情况下失败时会自动切到备用路由，结果里的 route 字段是
+    实际使用的路由，route_fallback 记录切换原因；交付时应如实转述这两项。
     dry_run=true 时同步返回路由与请求预览，不扣费。交付时如实转述上游实际像素尺寸。
     """
     req = _build_request(

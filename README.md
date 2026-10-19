@@ -103,13 +103,63 @@ ZCode 的 directory 类市场在**添加时会把清单与插件内容快照**�
 mkdir -p ~/.pdog-image && cp config.example.json ~/.pdog-image/config.json  # 填入真实 Key
 ```
 
+### 多路由配置（推荐）
+
+`routes` 是一个**有序数组**：第一个能服务该档位的路由是主路由，失败时按顺序尝试后面的。
+每条路由有自己的 `base_url`、Key 和模型，因此 1K/2K 与 4K 可以指向完全不同的网关：
+
+```json
+{
+  "routes": [
+    {
+      "name": "main",
+      "base_url": "https://ai.whyshy.cn",
+      "api_keys": { "1k": "sk-...", "4k": "sk-..." },
+      "generation": "gpt-image-2.5-flare",
+      "edit": "gpt-image-2.5-sunburst",
+      "generation_4k": "gpt-image-2",
+      "edit_4k": "gpt-image-2"
+    },
+    {
+      "name": "backup",
+      "base_url": "https://backup.example/v1",
+      "api_keys": { "1k": "sk-...", "4k": "sk-..." },
+      "generation": "gpt-image-2.5-flare",
+      "edit": "gpt-image-2.5-sunburst",
+      "tiers": ["1k", "2k"]
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `name` | 路由名，出现在结果与日志里 |
+| `base_url` | 该路由的网关地址；缺省时继承顶层 `base_url` |
+| `api_keys.1k` / `api_keys.4k` | 该路由的普通档 / 4K 档 Key；`1k` 同时服务 2K |
+| `api_key` | 单 Key 简写，未分档时两个档位共用 |
+| `generation` / `edit` | 文生图 / 编辑各自的模型 ID，可以不同 |
+| `generation_4k` / `edit_4k` | 4K 档专用模型，缺省时回落到对应的通用模型 |
+| `tiers` | 该路由只服务哪些档位（`1k`/`2k`/`4k`），省略表示全部 |
+
+**兜底规则**（重要）：
+
+- 路由链按 `routes` 数组顺序执行，第一条是主路由。
+- 只有**不可能已计费**的失败才会切换：连接失败、HTTP 4xx/5xx 拒绝、模型不存在。
+- **请求超时不会切换**——请求可能已送达上游并计费，换路由重试会重复扣费。
+- **异步任务一旦拿到 `task_id` 就不会切换**：任务已计费，只轮询或放弃。
+- 切换后结果里 `route` 是实际使用的路由，`route_fallback` 记录原因；模型不同时另有 `model_fallback`。交付时应如实转述。
+
+旧的扁平配置（顶层 `base_url` + `api_keys` + `models`）仍然支持，会被自动当作单条路由，
+行为与之前一致。
+
 | 环境变量 | 作用 |
 |---|---|
-| `PDOG_BASE_URL` | 网关地址（默认 `https://ai.whyshy.cn`） |
-| `PDOG_API_KEY_1K` / `PDOG_API_KEY_4K` | 普通档 / 4K 档 Key（覆盖文件配置） |
+| `PDOG_BASE_URL` | 覆盖顶层网关地址（未显式配置 `base_url` 的路由会继承） |
+| `PDOG_API_KEY_1K` / `PDOG_API_KEY_4K` | 普通档 / 4K 档 Key（作用于顶层 `api_keys`） |
 | `PDOG_CONFIG` | 指定配置文件路径 |
 
-密钥永不进入工具返回值与日志（`mask_key` 掩码 + 错误信息清洗）。
+密钥永不进入工具返回值与日志（`mask_key` 掩码 + 错误信息清洗）；多路由下所有路由的 Key 都会被清洗。
 分发部署时用 `config.example.json` 作模板，**不要提交真实 `config.json`**（已 gitignore）。
 
 ## 本地开发与测试

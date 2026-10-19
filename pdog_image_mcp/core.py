@@ -143,13 +143,20 @@ def load_config(explicit: str | os.PathLike | None = None) -> dict[str, Any]:
             hint="Copy config.example.json to config.json and fill in your keys.",
         )
 
-    if not isinstance(config.get("base_url"), str) or not config["base_url"].strip():
-        raise PdogError("Configuration is missing a non-empty 'base_url' value.", kind="config")
-    if not isinstance(config.get("model"), str) or not config["model"].strip():
-        raise PdogError("Configuration is missing a non-empty 'model' value.", kind="config")
+    # A routes-based config carries its own base_url/model per route, so the
+    # top-level fields are only required by the legacy flat layout.
+    has_routes = isinstance(config.get("routes"), (list, dict)) and bool(config.get("routes"))
+    if not has_routes:
+        if not isinstance(config.get("base_url"), str) or not config["base_url"].strip():
+            raise PdogError("Configuration is missing a non-empty 'base_url' value.", kind="config")
+        if not isinstance(config.get("model"), str) or not config["model"].strip():
+            raise PdogError("Configuration is missing a non-empty 'model' value.", kind="config")
 
     if os.environ.get("PDOG_BASE_URL"):
         config["base_url"] = os.environ["PDOG_BASE_URL"].strip()
+        for route in config["routes"] if isinstance(config.get("routes"), list) else []:
+            if isinstance(route, dict) and not route.get("base_url"):
+                route["base_url"] = config["base_url"]
     api_keys = config.setdefault("api_keys", {})
     if not isinstance(api_keys, dict):
         api_keys = {}
@@ -162,17 +169,260 @@ def load_config(explicit: str | os.PathLike | None = None) -> dict[str, Any]:
     return config
 
 
+# ---------------------------------------------------------------------------
+# Routes: per-tier endpoints/keys with ordered fallback
+# ---------------------------------------------------------------------------
+
+# A route is one credential+endpoint pair: `base_url`, keys per tier, and the
+# models it serves for generation and editing. Requests resolve to an ordered
+# list of routes for their tier; if the first fails in a way that cannot have
+# been billed, the next one is tried.
+
+@dataclass(frozen=True)
+class Route:
+    """One upstream endpoint with its keys and models."""
+
+    name: str
+    base_url: str
+    api_key_1k: str = ""
+    api_key_4k: str = ""
+    model_generation: str = ""
+    model_edit: str = ""
+    model_generation_4k: str = ""
+    model_edit_4k: str = ""
+    # Additional model IDs this route accepts when a caller names one
+    # explicitly (legacy configs list them in `models`).
+    extra_models: Tuple[str, ...] = ()
+    # Tiers this route is eligible for; empty means every tier.
+    tiers: Tuple[str, ...] = ()
+
+    def key_for(self, tier: str) -> str:
+        return self.api_key_4k if tier == "4k" else self.api_key_1k
+
+    def model_for(self, tier: str, edit_mode: bool) -> str:
+        """Concrete model for this tier/mode, falling back along the chain.
+
+        A route that only declares a generation model still serves edits with
+        it, which matches how the legacy single-model config behaved.
+        """
+        four_k = tier == "4k"
+        if edit_mode:
+            candidates = (
+                (self.model_edit_4k, self.model_generation_4k, self.model_edit, self.model_generation)
+                if four_k
+                else (self.model_edit, self.model_generation)
+            )
+        else:
+            candidates = (
+                (self.model_generation_4k, self.model_edit_4k, self.model_generation, self.model_edit)
+                if four_k
+                else (self.model_generation, self.model_edit)
+            )
+        for candidate in candidates:
+            if candidate:
+                return candidate
+        return ""
+
+    def accepted_models(self, tier: str) -> Tuple[str, ...]:
+        """Model IDs a caller may request explicitly on this tier.
+
+        A route that declares tier-specific models restricts that tier to them;
+        otherwise the tier inherits the general models. `extra_models` always
+        applies, which is how legacy configs keep accepting every alias they
+        list in `models`.
+        """
+        if tier == "4k" and (self.model_generation_4k or self.model_edit_4k):
+            base = (self.model_generation_4k, self.model_edit_4k)
+        else:
+            base = (
+                self.model_generation,
+                self.model_edit,
+                self.model_generation_4k,
+                self.model_edit_4k,
+            )
+        merged = list(base) + list(self.extra_models)
+        return tuple(dict.fromkeys(model for model in merged if model))
+
+    def serves(self, tier: str) -> bool:
+        return not self.tiers or tier in self.tiers
+
+    def keys(self) -> list[str]:
+        return [key for key in (self.api_key_1k, self.api_key_4k) if key]
+
+
+def _first_str(*candidates: Any) -> str:
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _route_from_mapping(
+    name: str,
+    raw: dict[str, Any],
+    *,
+    config: dict[str, Any],
+) -> Optional[Route]:
+    """Build one Route from a config object.
+
+    Supported shapes (all optional except base_url somewhere):
+      {"base_url", "api_key" | "api_keys": {"1k","4k"}, "tiers": [...]}
+      {"model", "generation", "edit", "generation_4k", "edit_4k"}
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    base_url = raw.get("base_url") or config.get("base_url") or ""
+    if not isinstance(base_url, str) or not base_url.strip():
+        return None
+
+    keys = raw.get("api_keys") if isinstance(raw.get("api_keys"), dict) else {}
+    # A single `api_key` covers both tiers, which is what the legacy flat config
+    # meant; an explicit api_keys slot always wins over it.
+    key_1k = _first_str(keys.get("1k"), raw.get("api_key_1k"), raw.get("api_key"))
+    key_4k = _first_str(keys.get("4k"), raw.get("api_key_4k"), raw.get("api_key"))
+
+    models = raw.get("models") if isinstance(raw.get("models"), dict) else {}
+
+    generation = _first_str(
+        raw.get("generation"), raw.get("model_generation"), models.get("generation")
+    )
+    edit = _first_str(raw.get("edit"), raw.get("model_edit"), models.get("edit"))
+    generation_4k = _first_str(
+        raw.get("generation_4k"),
+        raw.get("model_generation_4k"),
+        models.get("generation_4k"),
+    )
+    edit_4k = _first_str(raw.get("edit_4k"), raw.get("model_edit_4k"), models.get("edit_4k"))
+
+    tiers_raw = raw.get("tiers")
+    tiers: Tuple[str, ...] = ()
+    if isinstance(tiers_raw, (list, tuple)):
+        tiers = tuple(
+            str(item).lower() for item in tiers_raw if str(item).lower() in VALID_RESOLUTIONS
+        )
+
+    extra_models = tuple(
+        value.strip()
+        for value in models.values()
+        if isinstance(value, str) and value.strip()
+    )
+
+    return Route(
+        name=name,
+        base_url=base_url.rstrip("/"),
+        api_key_1k=key_1k,
+        api_key_4k=key_4k,
+        model_generation=generation,
+        model_edit=edit,
+        model_generation_4k=generation_4k,
+        model_edit_4k=edit_4k,
+        extra_models=extra_models,
+        tiers=tiers,
+    )
+
+
+def _legacy_route(config: dict[str, Any]) -> Optional[Route]:
+    """Translate the pre-routes flat config into a single Route.
+
+    The flat layout kept one base_url with per-tier keys and model aliases in
+    `models` / `model_auto_routing`, so all of that has to be flattened into one
+    concrete route here.
+    """
+    models = config.get("models") if isinstance(config.get("models"), dict) else {}
+    routing = (
+        config.get("model_auto_routing")
+        if isinstance(config.get("model_auto_routing"), dict)
+        else {}
+    )
+    default_alias = config.get("model_default_alias", "flare")
+
+    def alias_model(key: str, fallback: str = "") -> str:
+        alias = routing.get(key) or fallback or default_alias
+        if isinstance(alias, str) and alias in models:
+            resolved = models.get(alias)
+            if isinstance(resolved, str) and resolved.strip():
+                return resolved.strip()
+        if isinstance(alias, str) and alias.strip():
+            return alias.strip()
+        return ""
+
+    generation = alias_model("generation", default_alias)
+    edit = alias_model("edit", default_alias)
+    generation_4k = alias_model("generation_4k", routing.get("generation") or default_alias)
+    edit_4k = alias_model("edit_4k", routing.get("edit") or default_alias)
+
+    # A flat config with no explicit per-mode models still gets the global
+    # `model` value so it behaves exactly as before.
+    global_model = config.get("model")
+    if not isinstance(global_model, str) or not global_model.strip():
+        global_model = ""
+    else:
+        global_model = global_model.strip()
+    if not generation:
+        generation = global_model
+    if not edit:
+        edit = global_model
+
+    api_keys = config.get("api_keys") if isinstance(config.get("api_keys"), dict) else {}
+    return _route_from_mapping(
+        "default",
+        {
+            "base_url": config.get("base_url"),
+            "api_keys": api_keys,
+            "api_key": config.get("api_key"),
+            "generation": generation,
+            "edit": edit,
+            "generation_4k": generation_4k,
+            "edit_4k": edit_4k,
+        },
+        config=config,
+    )
+
+
+def normalize_routes(config: dict[str, Any]) -> List[Route]:
+    """Return the effective route list, primary first.
+
+    `routes` in config may be a list of route objects (ordered fallback) or a
+    mapping of name -> route object. When absent, the legacy flat config is
+    translated into a single route so old configs keep working unchanged.
+    """
+    raw_routes = config.get("routes")
+    routes: List[Route] = []
+
+    if isinstance(raw_routes, list):
+        for index, item in enumerate(raw_routes):
+            if not isinstance(item, dict):
+                continue
+            name = _first_str(item.get("name")) or f"route-{index + 1}"
+            route = _route_from_mapping(name, item, config=config)
+            if route is not None:
+                routes.append(route)
+    elif isinstance(raw_routes, dict):
+        for name, item in raw_routes.items():
+            if not isinstance(item, dict):
+                continue
+            route = _route_from_mapping(str(name), item, config=config)
+            if route is not None:
+                routes.append(route)
+
+    if not routes:
+        legacy = _legacy_route(config)
+        if legacy is not None:
+            routes.append(legacy)
+    return routes
+
+
+def routes_for_tier(config: dict[str, Any], tier: str) -> List[Route]:
+    """Eligible routes for a tier, in configured fallback order."""
+    return [route for route in normalize_routes(config) if route.serves(tier)]
+
+
 def config_secret_values(config: dict[str, Any]) -> list[str]:
-    """All configured API keys, for scrubbing secrets out of error text."""
+    """All configured API keys across every route, for scrubbing error text."""
     values: list[str] = []
-    api_keys = config.get("api_keys")
-    if isinstance(api_keys, dict):
-        for value in api_keys.values():
-            if isinstance(value, str) and value.strip():
-                values.append(value.strip())
-    fallback = config.get("api_key")
-    if isinstance(fallback, str) and fallback.strip():
-        values.append(fallback.strip())
+    for route in normalize_routes(config):
+        values.extend(route.keys())
     return values
 
 
@@ -288,9 +538,6 @@ def resolve_tier(
             kind="invalid_parameter",
         )
 
-    api_keys = config.get("api_keys", {})
-    fallback_key = config.get("api_key", "")
-
     # 1. Determine resolution tier
     if is_4k or resolution == "4k":
         mode = "4k"
@@ -316,18 +563,24 @@ def resolve_tier(
         else:
             mode = "1k"
 
-    # 2. Pick the corresponding API key (2K uses the regular 1K key)
-    key_slot = "4k" if mode == "4k" else "1k"
-    if isinstance(api_keys, dict) and key_slot in api_keys and api_keys[key_slot]:
-        key = api_keys[key_slot].strip()
-    else:
-        key = fallback_key.strip() if isinstance(fallback_key, str) else ""
+    # 2. Pick the key from the first route that serves this tier
+    key = ""
+    for route in routes_for_tier(config, mode):
+        candidate = route.key_for(mode)
+        if candidate:
+            key = candidate
+            break
+    if not key:
+        # Legacy configs may still carry a bare `api_key` with no routes.
+        fallback_key = config.get("api_key", "")
+        if isinstance(fallback_key, str) and fallback_key.strip():
+            key = fallback_key.strip()
 
     if not key:
         raise PdogError(
             f"No API key configured for resolution mode '{mode}'.",
             kind="config",
-            hint="Set api_keys in config.json or the PDOG_API_KEY_* environment variables.",
+            hint="Configure `routes` (or api_keys) in config.json, or set PDOG_API_KEY_*.",
         )
 
     # 3. Determine target size
@@ -357,46 +610,67 @@ def resolve_model(
     model: str = "auto",
     edit_mode: bool,
     tier: str,
+    route: Optional[Route] = None,
 ) -> Tuple[str, str]:
     """Resolve the concrete model ID and a human-readable reason.
 
-    'auto' routes generation to flare and edits to sunburst; sunburst is not
-    served on the 4K account group, so 4K work always falls back to flare.
+    'auto' takes the route's configured generation/edit model for the tier.
+    When the config has no `routes`, the legacy `models` / `model_auto_routing`
+    aliases are honoured so existing configs resolve to the same model IDs.
+
+    `route` may name the route to resolve against; without it the first route
+    that serves `tier` is used.
     """
     if model not in VALID_MODELS:
         raise PdogError(
             f"Invalid model '{model}'. Valid values: {', '.join(VALID_MODELS)}.",
             kind="invalid_parameter",
         )
-    models = config.get("models", {}) if isinstance(config.get("models"), dict) else {}
-    routing = config.get("model_auto_routing", {}) if isinstance(config.get("model_auto_routing"), dict) else {}
-    default_alias = config.get("model_default_alias", "flare")
 
-    def model_id(alias: str) -> Optional[str]:
-        value = models.get(alias)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        return None
+    models = config.get("models", {}) if isinstance(config.get("models"), dict) else {}
+    resolved_route = route
+    if resolved_route is None:
+        candidates = routes_for_tier(config, tier)
+        resolved_route = candidates[0] if candidates else None
+    if resolved_route is None:
+        raise PdogError(
+            f"No route is configured for resolution mode '{tier}'.",
+            kind="config",
+            hint="Add a `routes` entry covering this tier, or set base_url/api_keys.",
+        )
 
     if model == "auto":
-        if tier == "4k":
-            # The 4K account group does not serve the 2.5 family (实测全路由
-            # model_not_found), so 4K auto routes straight to the legacy model
-            # via generation_4k / edit_4k instead of wasting a doomed attempt.
-            key = "edit_4k" if edit_mode else "generation_4k"
-            alias = (
-                routing.get(key)
-                or routing.get("edit_4k" if edit_mode else "generation", default_alias)
-            )
-            reason = f"auto-4k-{'edit' if edit_mode else 'generation'}"
-        else:
-            alias = routing.get("edit" if edit_mode else "generation", default_alias)
-            reason = "auto-edit" if edit_mode else "auto-generation"
+        reason = (
+            f"auto-4k-{'edit' if edit_mode else 'generation'}"
+            if tier == "4k"
+            else ("auto-edit" if edit_mode else "auto-generation")
+        )
+        resolved = resolved_route.model_for(tier, edit_mode)
     else:
-        alias = model
         reason = f"explicit({model})"
+        # An explicit request may be an alias (legacy configs) or a real model
+        # ID; resolve aliases first, then accept the literal value.
+        resolved = ""
+        alias_value = models.get(model)
+        if isinstance(alias_value, str) and alias_value.strip():
+            resolved = alias_value.strip()
+        elif model in resolved_route.accepted_models(tier) or not models:
+            if model in VALID_MODELS:
+                # Legacy aliases map through `models`; when a route declares its
+                # own model IDs, an alias with no mapping cannot be honoured.
+                resolved = alias_value.strip() if isinstance(alias_value, str) else ""
+        if not resolved:
+            aliases = resolved_route.accepted_models(tier)
+            if model in aliases:
+                resolved = model
+            else:
+                raise PdogError(
+                    f"Model '{model}' is not configured on route '{resolved_route.name}' "
+                    f"for tier '{tier}'. Available: {', '.join(aliases) or '(none)'}.",
+                    kind="invalid_parameter",
+                    route=resolved_route.name,
+                )
 
-    resolved = model_id(alias) or model_id(default_alias) or config.get("model")
     if not isinstance(resolved, str) or not resolved.strip():
         raise PdogError("No usable model ID resolved from configuration.", kind="config")
     resolved = resolved.strip()
@@ -504,7 +778,22 @@ def request_image(
                 log(f"Network error ({exc}), retrying in {backoff}s... (Attempt {attempt + 1}/{max_retries})")
                 time.sleep(backoff)
                 continue
-            raise PdogError(f"Could not reach Image API: {exc}", kind="network") from exc
+            # A timeout after the request was sent may already have been billed
+            # upstream, so another route must not silently resubmit it. A
+            # connection that never opened cannot have produced an image.
+            timed_out = isinstance(exc, (TimeoutError, socket.timeout)) or isinstance(
+                getattr(exc, "reason", None), (TimeoutError, socket.timeout)
+            )
+            raise PdogError(
+                f"Could not reach Image API: {exc}",
+                kind="network",
+                failover_safe=not timed_out,
+                hint=(
+                    "请求已发出但超时，上游可能已计费；换路由重试可能重复扣费，请先确认。"
+                    if timed_out
+                    else None
+                ),
+            ) from exc
 
     raise PdogError("Image API request failed after retries.", kind="network")
 
@@ -926,6 +1215,19 @@ def _finalize_images(
     }
 
 
+@dataclass
+class _JobOutcome:
+    """Result of executing on one route (successful, or pending async task)."""
+
+    images: List[bytes]
+    transport: str
+    model: str
+    model_reason: str
+    route: str
+    pending_task_id: Optional[str] = None
+    pending_status: Optional[str] = None
+
+
 def _resolve_chroma_key(req: GenRequest, first_image_bytes: bytes) -> Tuple[Tuple[int, int, int], dict]:
     from . import chroma as _chroma
 
@@ -964,7 +1266,21 @@ def run_generation(
             hint="用户明确要求 4K 后，携带 allow_4k=true 重新调用本工具。",
         )
 
-    model_id, model_reason = resolve_model(config, model=req.model, edit_mode=edit_mode, tier=tier)
+    # Fallback chain for this tier. A route with no key for the tier cannot
+    # serve it, so it is skipped instead of failing the whole request.
+    routes = [route for route in routes_for_tier(config, tier) if route.key_for(tier)]
+    if not routes:
+        raise PdogError(
+            f"No route with an API key is configured for resolution mode '{tier}'.",
+            kind="config",
+            hint="Add a `routes` entry covering this tier, or set api_keys for it.",
+        )
+    primary = routes[0]
+    api_key = primary.key_for(tier)
+    base_url = primary.base_url
+    model_id, model_reason = resolve_model(
+        config, model=req.model, edit_mode=edit_mode, tier=tier, route=primary
+    )
 
     quality = req.quality or config.get("default_quality", "xhigh")
     if quality not in VALID_QUALITIES:
@@ -1039,14 +1355,19 @@ def run_generation(
 
     if req.dry_run:
         preview = {
-            "endpoint": get_async_endpoint(config["base_url"], edit_mode=edit_mode) if use_async
-            else get_endpoint(config["base_url"], edit_mode=edit_mode),
+            "endpoint": get_async_endpoint(base_url, edit_mode=edit_mode) if use_async
+            else get_endpoint(base_url, edit_mode=edit_mode),
             "transport": "async" if use_async else "sync",
             "async_mode": async_mode,
             "model": model_id,
             "model_reason": model_reason,
             "tier": tier,
             "api_key": mask_key(api_key),
+            "route": primary.name,
+            "fallback_routes": [
+                {"route": route.name, "base_url": route.base_url}
+                for route in routes[1:]
+            ],
             "mode": "edit" if edit_mode else "text-to-image",
             "content_type": "multipart/form-data" if edit_mode else "application/json",
             "payload": payload,
@@ -1065,6 +1386,7 @@ def run_generation(
 
     legacy_model = (config.get("models", {}) or {}).get("image-2") or "gpt-image-2"
     model_fallback_note: Optional[str] = None
+    route_fallback_note: Optional[str] = None
 
     def _model_not_found(exc: PdogError) -> bool:
         text = f"{exc.message} {exc.hint or ''}".lower()
@@ -1080,20 +1402,9 @@ def run_generation(
             return False
         return exc.http_status == 404 or _model_not_found(exc)
 
-    def _sync_call() -> bytes:
-        return request_image(
-            config["base_url"],
-            api_key,
-            payload,
-            images=images,
-            mask=mask,
-            timeout_seconds=max(timeout_sec, 600.0) if tier == "4k" else timeout_sec,
-            max_retries=req.retries,
-        )
-
-    def _sync_extract(api_resp: bytes) -> List[bytes]:
+    def _sync_extract(api_resp: bytes, api_key_used: str, base_url_used: str) -> List[bytes]:
         try:
-            return extract_images(api_resp, api_key=api_key, base_url=config["base_url"])
+            return extract_images(api_resp, api_key=api_key_used, base_url=base_url_used)
         except PdogError as exc:
             response_cache = Path.cwd() / "output" / (
                 f"pdog-response-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
@@ -1116,59 +1427,197 @@ def run_generation(
         model_id, model_fallback_note = legacy_model, fallback_note
         log(fallback_note)
 
-    if use_async:
+    def _model_for_route(route: Route) -> Tuple[str, str]:
+        """Model ID to use on `route`, plus a note when it differs from the primary."""
         try:
+            candidate, reason = resolve_model(
+                config, model=req.model, edit_mode=edit_mode, tier=tier, route=route
+            )
+            return candidate, reason
+        except PdogError:
+            # An explicit model that this route does not serve: use the route's
+            # own auto model rather than failing the whole fallback.
+            if req.model == "auto":
+                raise
+            candidate = route.model_for(tier, edit_mode)
+            if not candidate:
+                raise
+            return candidate, f"fallback-auto({route.name})"
+
+    def _run_on_route(route: Route) -> Tuple[List[bytes], str, str, str, str]:
+        """Execute on one route.
+
+        Returns (images, transport, model_used, model_reason_used, route_name).
+        Raises PdogError; `failover_safe` on the error says whether the next
+        route may be attempted.
+        """
+        route_key = route.key_for(tier)
+        route_model, route_reason = _model_for_route(route)
+        route_payload = {**payload, "model": route_model}
+
+        if use_async:
             task_id = submit_async_task(
-                config["base_url"],
-                api_key,
-                payload,
+                route.base_url,
+                route_key,
+                route_payload,
                 images=images,
                 mask=mask,
                 timeout_seconds=timeout_sec,
                 max_retries=req.retries,
             )
             if on_event:
-                on_event({"type": "submitted", "task_id": task_id, "model": model_id})
-            polled = poll_async_task(
-                config["base_url"],
-                api_key,
-                task_id,
-                poll_interval=poll_interval,
-                task_timeout=task_timeout,
-                block_seconds=req.block_seconds,
-                on_event=on_event,
-            )
-        except PdogError as exc:
-            if not _should_fallback_to_legacy(exc):
-                raise
-            _switch_to_legacy()
-            images_data = _sync_extract(_sync_call())
-        else:
-            if polled["state"] == "pending":
-                return {
-                    "ok": True,
-                    "pending": True,
+                on_event({
+                    "type": "submitted",
                     "task_id": task_id,
-                    "task_status": polled["status"],
-                    "mode": "edit" if edit_mode else "text-to-image",
-                    "model": model_id,
-                    "model_reason": model_reason,
-                    "tier": tier,
-                    "requested_size": final_size,
-                    "transport": f"async({task_id})",
-                    "note": "任务已提交并计费，切勿重复提交；稍后用 pdog_task_status(task_id) 继续查询。",
-                }
-            images_data = polled["images"]
-            transport_note = f"async({task_id})"
-    else:
-        try:
-            api_resp = _sync_call()
-        except PdogError as exc:
-            if not _should_fallback_to_legacy(exc):
+                    "model": route_model,
+                    "route": route.name,
+                })
+            # Once a task id exists the job is billed: poll failures must not
+            # trigger a resubmission on another route.
+            try:
+                polled = poll_async_task(
+                    route.base_url,
+                    route_key,
+                    task_id,
+                    poll_interval=poll_interval,
+                    task_timeout=task_timeout,
+                    block_seconds=req.block_seconds,
+                    on_event=on_event,
+                )
+            except PdogError as exc:
+                exc.failover_safe = False
+                exc.route = route.name
                 raise
-            _switch_to_legacy()
-            api_resp = _sync_call()
-        images_data = _sync_extract(api_resp)
+            if polled["state"] == "pending":
+                return _JobOutcome(
+                    images=[],
+                    transport=f"async({task_id})",
+                    model=route_model,
+                    model_reason=route_reason,
+                    route=route.name,
+                    pending_task_id=task_id,
+                    pending_status=polled["status"],
+                )
+            return _JobOutcome(
+                images=polled["images"],
+                transport=f"async({task_id})",
+                model=route_model,
+                model_reason=route_reason,
+                route=route.name,
+            )
+
+        api_resp = request_image(
+            route.base_url,
+            route_key,
+            route_payload,
+            images=images,
+            mask=mask,
+            timeout_seconds=max(timeout_sec, 600.0) if tier == "4k" else timeout_sec,
+            max_retries=req.retries,
+        )
+        return _JobOutcome(
+            images=_sync_extract(api_resp, route_key, route.base_url),
+            transport="sync",
+            model=route_model,
+            model_reason=route_reason,
+            route=route.name,
+        )
+
+    images_data: List[bytes] = []
+    last_error: Optional[PdogError] = None
+    tried: List[str] = []
+    outcome: Optional[_JobOutcome] = None
+    for index, route in enumerate(routes):
+        tried.append(route.name)
+        try:
+            outcome = _run_on_route(route)
+        except PdogError as exc:
+            exc.route = exc.route or route.name
+            last_error = exc
+
+            # Same-route 4K legacy model fallback keeps its original behaviour:
+            # a model the 4K group does not serve is retried once on the same
+            # route with the legacy model, over the sync endpoint.
+            if _should_fallback_to_legacy(exc):
+                _switch_to_legacy()
+                try:
+                    api_resp = request_image(
+                        route.base_url, route.key_for(tier), payload,
+                        images=images, mask=mask,
+                        timeout_seconds=max(timeout_sec, 600.0) if tier == "4k" else timeout_sec,
+                        max_retries=req.retries,
+                    )
+                    outcome = _JobOutcome(
+                        images=_sync_extract(api_resp, route.key_for(tier), route.base_url),
+                        transport="sync",
+                        model=legacy_model,
+                        model_reason=model_reason,
+                        route=route.name,
+                    )
+                    break
+                except PdogError as retry_exc:
+                    retry_exc.route = retry_exc.route or route.name
+                    last_error = retry_exc
+                    exc = retry_exc
+
+            if not exc.failover_safe or index == len(routes) - 1:
+                raise
+            next_route = routes[index + 1]
+            note = (
+                f"route {route.name} -> {next_route.name}: "
+                f"{exc.message}；已切换备用路由"
+            )
+            log(note)
+            route_fallback_note = (
+                f"{note}（已尝试：{', '.join(tried)}）"
+                if not route_fallback_note
+                else f"{route_fallback_note}；{note}"
+            )
+            if on_event:
+                on_event({
+                    "type": "route_fallback",
+                    "from": route.name,
+                    "to": next_route.name,
+                    "reason": exc.message,
+                })
+            continue
+
+        # A successful route may differ from the primary; record the switch with
+        # the model it actually used.
+        if outcome.route != primary.name and outcome.model != model_id:
+            model_fallback_note = (
+                f"{model_id} -> {outcome.model}: 备用路由 {outcome.route} 使用自己的模型"
+            )
+        model_id, model_reason = outcome.model, outcome.model_reason
+        break
+    else:  # pragma: no cover - loop exits via break or raise
+        if last_error is not None:
+            raise last_error
+        raise PdogError("No route could serve the request.", kind="config")
+
+    if outcome is None:  # pragma: no cover - defensive
+        raise PdogError("No route produced a result.", kind="config")
+
+    applied_route = outcome.route
+    images_data = outcome.images
+    transport_note = outcome.transport
+
+    if outcome.pending_task_id:
+        return {
+            "ok": True,
+            "pending": True,
+            "task_id": outcome.pending_task_id,
+            "task_status": outcome.pending_status,
+            "mode": "edit" if edit_mode else "text-to-image",
+            "model": model_id,
+            "model_reason": model_reason,
+            "tier": tier,
+            "requested_size": final_size,
+            "transport": transport_note,
+            "route": applied_route,
+            "route_fallback": route_fallback_note,
+            "note": "任务已提交并计费，切勿重复提交；稍后用 pdog_task_status(task_id) 继续查询。",
+        }
 
     first_output = (
         Path(req.output).expanduser() if req.output else default_output()
@@ -1192,6 +1641,8 @@ def run_generation(
         "tier": tier,
         "requested_size": final_size,
         "transport": transport_note,
+        "route": applied_route,
+        "route_fallback": route_fallback_note,
         **finalized,
     }
     actual = [(f["width"], f["height"]) for f in finalized["files"] if f.get("role") == "final" and f.get("width")]
