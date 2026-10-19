@@ -1,0 +1,16 @@
+# Secrets — never commit
+config.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Local artifacts
+output/
+pdog-image-output/
+pelican-bike/
+
+# macOS
+.DS_Store

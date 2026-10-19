@@ -1,0 +1,6 @@
+{
+  "name": "pdog-image",
+  "version": "1.2.2",
+  "description": "Pdog GPT Image 2.5 生图/图像编辑：MCP 工具（pdog_generate/pdog_edit 等 5 个）+ 判断层技能。安装即自动连接 MCP。",
+  "skills": "skills"
+}

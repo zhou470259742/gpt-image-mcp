@@ -1,0 +1,29 @@
+{
+  "base_url": "https://ai.whyshy.cn",
+  "model": "gpt-image-2.5-flare",
+  "models": {
+    "flare": "gpt-image-2.5-flare",
+    "sunburst": "gpt-image-2.5-sunburst",
+    "image-2": "gpt-image-2"
+  },
+  "model_default_alias": "flare",
+  "model_auto_routing": {
+    "generation": "flare",
+    "edit": "sunburst",
+    "edit_4k": "image-2",
+    "generation_4k": "image-2"
+  },
+  "async": {
+    "mode": "auto",
+    "poll_interval_seconds": 5,
+    "task_timeout_seconds": 1800
+  },
+  "default_resolution": "1k",
+  "default_quality": "xhigh",
+  "timeout_seconds": 300,
+  "api_keys": {
+    "1k": "sk-SET-YOUR-REGULAR-KEY",
+    "4k": "sk-SET-YOUR-4K-KEY"
+  },
+  "api_key": "sk-LEGACY-FALLBACK-KEY"
+}

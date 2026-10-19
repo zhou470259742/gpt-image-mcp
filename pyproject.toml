@@ -1,0 +1,35 @@
+[project]
+name = "pdog-image-mcp"
+version = "1.0.0"
+description = "Pdog GPT Image 2.5 image generation/editing MCP server (engine extracted from the pdog-gpt-image2 skill)"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.2.0,<2",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+chroma = [
+    "opencv-python-headless>=4.8",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+pdog-image-mcp = "pdog_image_mcp.server:main"
+pdog-image = "pdog_image_mcp.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pdog_image_mcp"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

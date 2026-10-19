@@ -1,0 +1,152 @@
+# pdog-image2-mcp
+
+Pdog GPT Image 2.5 生图/图像编辑的 **MCP server + ZCode 插件**。逻辑提取自
+`pdog-gpt-image2` 技能的 `generate_image.py`，行为保持一致（网络兜底、档位分流、扣费守卫、原样交付），
+并新增协议级的 4K 扣费确认、结构化返回与密钥隔离。
+
+**本仓库即插件包**：安装插件一次性完成「MCP 注册 + 自动连接 + 判断层技能」。
+
+## 目录结构
+
+```
+├── .zcode-plugin/plugin.json    # 插件清单：mcpServers + skills
+├── skills/pdog-image/SKILL.md   # 判断层技能（4K 决策树、提示词语义、透明验收）
+├── pdog_image_mcp/              # 服务端源码
+│   ├── core.py                  # 引擎：配置/路由/HTTP/异步编排（PdogError 结构化）
+│   ├── netlayer.py              # DoH Fake-IP 兜底 + 无 SNI + 证书强校验
+│   ├── transparency.py          # 透明验证（alpha>=8 BBox / >=16 碰边 / 软边）
+│   ├── chroma.py                # 动态色键转 Alpha（可选依赖 cv2）
+│   ├── server.py                # FastMCP：5 工具 + 4 resources
+│   └── cli.py                   # 技能对齐命令行（pdog-image）
+├── docs/                        # MCP resources 暴露的参考文档
+└── tests/                       # 单元 + stdio 协议 + 真实 API（门控）测试
+```
+
+## 工具面
+
+| 工具 | 费用 | 说明 |
+|---|---|---|
+| `pdog_generate` | 计费 | 文生图；**立即返回 job_id**，后台渲染（约 20-120s）；4K 必须 `allow_4k=true`（协议级守卫） |
+| `pdog_edit` | 计费 | 参考图整图编辑（默认 sunburst）；同样 job 模式；仅用户显性要求时传 `mask` |
+| `pdog_task_status` | 免费 | 轮询 job_id（或上游 task_id）；wait_seconds≤25；完成返回文件与实际尺寸 |
+| `pdog_verify_transparency` | 免费 | alpha 统计/BBox/碰边判定（pass / review / fail / opaque） |
+| `pdog_chroma_key` | 免费 | 独立色键抠图，调参重试不再扣生成费（需 `--extra chroma`） |
+
+## 超时适配（job 模式，v1.1.0）
+
+MCP 客户端通常在 30s 处中止工具调用，而渲染需要 20-120s。因此计费调用**秒级返回
+`job_id`**，渲染在服务端后台线程执行，模型用 `pdog_task_status(job_id)` 轮询——
+单次调用永远远低于客户端超时，客户端超时也不再可能孤儿化已计费任务。
+参数错误与 4K 守卫在开任务前同步报错（预检）；job 仅存在于当前会话进程内。
+
+Resources：`pdog://docs/api-spec`、`pdog://docs/sizes`、`pdog://docs/errors`、`pdog://docs/chroma-key`。
+
+返回值为结构化 JSON：`files[].path/width/height`、`actual_size`（上游实返尺寸，**可能与请求不符，交付时如实转述**）、`model`、`tier`、`transport`、`transparency_check`。错误统一 `{"ok": false, "error": {kind, message, hint}}`，kind 含 `cost_guard` / `invalid_parameter` / `http` / `network` / `upstream` / `config`。
+
+## 安装（本机）
+
+前置：[uv](https://docs.astral.sh/uv/)（`uv --version` 自检）。
+
+**方式 A — 作为 ZCode 插件（推荐）**：设置 → 插件管理 → 发现 → 「+」添加本地目录，
+选择本仓库根目录。安装后每次会话自动连接 MCP、技能自动可触发。
+密钥从 `~/.pdog-image/config.json` 读取（见下文「配置与密钥」）。
+
+**方式 A2 — 通过本地插件市场**：把一个包含 `marketplace.json` 的目录添加为市场，
+即可在发现页列表中安装/更新 `pdog-image`；往市场清单里继续加插件条目即可扩展。
+
+**方式 B — 仅注册 MCP**：在 `~/.zcode/cli/config.json` 的 `mcp.servers` 加入
+（把路径替换为本仓库在你机器上的实际位置）：
+
+```json
+{
+  "pdog-image": {
+    "command": "uv",
+    "args": ["run", "--project", "/path/to/pdog-image2-mcp", "pdog-image-mcp"]
+  }
+}
+```
+
+**方式 C — 任意其他 MCP 客户端**：同上的 `command/args` 形式接入 stdio。
+
+## 可移植性（移动位置 / 发给别人）
+
+- **插件内零绝对路径**：MCP 启动声明在根级 `.mcp.json`，使用 `${CLAUDE_PLUGIN_ROOT}`
+  变量（与官方 android-emulator 插件同款机制）——插件装到哪，根目录解析到哪；
+  移动目录、换机器、通过 marketplace（本地目录/Git）分发都不会失效。
+- **分发前提**：目标机器装有 [uv](https://docs.astral.sh/uv/)（首次连接时 `uv run`
+  会按 `pyproject.toml` 自动构建环境）；密钥用 `PDOG_API_KEY_*` 环境变量或目标机的
+  config.json 提供，包内不含任何密钥。
+- 方式 B 中的绝对路径只是"本机用户级注册"的示例，属于用户自己的配置，不随插件分发。
+
+## 更新已安装的插件（重要）
+
+ZCode 的 directory 类市场在**添加时会把清单与插件内容快照**到客户端缓存
+（`~/.zcode/cli/plugins/marketplaces/hx-zcode-work/`），发现页读的是快照而非工作空间。
+因此改完工作空间代码后需要发布一步：
+
+```bash
+# 1) 改代码并验证：uv run pytest tests/ -q --ignore=tests/test_live_api.py
+# 2) 版本号 +1（两处保持一致）：.zcode-plugin/plugin.json 和 ../marketplace.json
+./scripts/publish.sh    # 3) 同步到市场快照
+# 4) 设置 → 插件管理 → 发现 → pdog-image → 更新
+# 5) 开新会话（MCP server 是会话级进程）
+```
+
+若发现页迟迟不刷新出新版本，重启 ZCode 客户端，或删除市场后重新添加。
+
+## 配置与密钥
+
+优先级：环境变量 > 显式路径（`$PDOG_CONFIG`）> `<仓库>/config.json` > **用户级 `~/.pdog-image/config.json`**（推荐的本机密钥存放处，跨插件更新/市场快照刷新稳定）> 旧技能目录（已废弃）。
+
+已安装插件（缓存副本）建议把密钥放用户级位置：
+```bash
+mkdir -p ~/.pdog-image && cp config.example.json ~/.pdog-image/config.json  # 填入真实 Key
+```
+
+| 环境变量 | 作用 |
+|---|---|
+| `PDOG_BASE_URL` | 网关地址（默认 `https://ai.whyshy.cn`） |
+| `PDOG_API_KEY_1K` / `PDOG_API_KEY_4K` | 普通档 / 4K 档 Key（覆盖文件配置） |
+| `PDOG_CONFIG` | 指定配置文件路径 |
+
+密钥永不进入工具返回值与日志（`mask_key` 掩码 + 错误信息清洗）。
+分发部署时用 `config.example.json` 作模板，**不要提交真实 `config.json`**（已 gitignore）。
+
+## 本地开发与测试
+
+```bash
+uv sync --extra chroma          # 引擎 + 色键依赖；主链路仅 mcp+pillow
+
+uv run pytest tests/ -q --ignore=tests/test_live_api.py   # 免费全套（50 例）
+uv run pdog-image --prompt "测试" --dry-run               # CLI 预览路由，不扣费
+
+RUN_LIVE=1 uv run pytest tests/test_live_api.py -q -s     # 真实 API（约 ¥0.12/轮）
+```
+
+免费协议测试使用指向本地不可达端点的隔离配置 + 假 Key，任何意外调用都会在
+连接阶段本地失败，**不可能产生真实流量或计费**。
+
+真实 API 覆盖：1K 同步生成 → 透明验证 → multipart 编辑（sunburst）→
+4K 异步（提交/轮询/下载）。产物在 `output/live/`。
+
+## 行为准则（与原技能一致）
+
+- 编辑默认只传 images + prompt；不自制、不推断 mask，不自动追加第二次调用。
+- 4K 仅显性请求 + `allow_4k=true`；伪 4K（≤2048 最大边走 4K 路由）直接拒绝。
+- 透明背景默认要求原生 Alpha，上游无透明像素即判失败；色键仅为显式回退，转换不缩放。
+- 异步任务已计费：超时返回 `task_id`，只轮询不重提（`pdog_task_status`）。
+- 400/401/402/404 不重试；502/503/504 指数退避最多 2 次。
+- DoH Fake-IP 兜底 + 无 SNI 连接强制证书校验（CA 链 + SAN），校验失败立即中止。
+
+## 网关实况（2026-09-16 实测，原技能文档已过时的部分）
+
+- **4K 账户组当前不提供 2.5 模型族**：`gpt-image-2.5-flare` / `sunburst` 在 4K 组的
+  同步（HTTP 404）与异步（task failed: model_not_found）路由均不可用；
+  旧版 `gpt-image-2` 在 4K 组同步路由实测可出真 4K（3840x2160）。
+- 引擎对策（v1.2.0）：4K 的 auto 路由**默认直连 gpt-image-2**（配置键 `generation_4k`/`edit_4k`，
+  生成与编辑同），不再先试注定失败的 2.5；显式指定 2.5 模型遇 `model_not_found` 仍自动回落一次
+  并带 `model_fallback` 标注。非 4K 档不受影响。
+- **quality 降级**：4K 异步校验仅接受 low/medium/high（xhigh 会在渲染前被拒），
+  引擎自动降为 high 并在结果 `quality_note` 注明。
+- 异步链路本身完好：普通组 1K `--async always` 实测提交→轮询→completed→下载全通。
+  4K 自动异步保留（若服务商恢复 4K 组的 2.5 配置即自动受益）。
