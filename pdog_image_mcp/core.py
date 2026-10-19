@@ -114,8 +114,8 @@ def _read_config_file(path: Path) -> dict[str, Any]:
 def load_config(explicit: str | os.PathLike | None = None) -> dict[str, Any]:
     """Load the Pdog configuration.
 
-    Search order: explicit path > $PDOG_CONFIG > <project>/config.json >
-    the user-level ~/.pdog-image/config.json (stable across plugin updates)
+    Search order: explicit path > $PDOG_CONFIG > the user-level
+    ~/.pdog-image/config.json (machine-stable key store) > <plugin>/config.json
     > the legacy pdog-gpt-image2 skill's config.json. Environment variables
     PDOG_BASE_URL / PDOG_API_KEY_1K / PDOG_API_KEY_4K / PDOG_API_KEY override
     the corresponding fields, so deployments can keep secrets out of files.
@@ -126,8 +126,10 @@ def load_config(explicit: str | os.PathLike | None = None) -> dict[str, Any]:
     env_path = os.environ.get("PDOG_CONFIG")
     if env_path:
         candidates.append(Path(env_path).expanduser())
-    candidates.append(PROJECT_CONFIG_PATH)
     candidates.append(USER_CONFIG_PATH)
+    # The plugin directory is last: a config left there is fine, but it must
+    # not shadow the machine-stable user-level key store.
+    candidates.append(PROJECT_CONFIG_PATH)
     candidates.append(SKILL_CONFIG_PATH)
 
     config: dict[str, Any] | None = None

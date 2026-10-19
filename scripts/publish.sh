@@ -22,9 +22,17 @@ TARGET=$(python3 -c "import json;print(json.load(open('$MARKET_ROOT/marketplace.
 
 rsync -a --delete \
   --exclude '.venv' --exclude '__pycache__' --exclude '.pytest_cache' \
-  --exclude 'output' --exclude '.DS_Store' \
+  --exclude 'output' --exclude '.DS_Store' --exclude '.git' \
+  --exclude 'config.json' --exclude 'pelican-bike' \
+  --delete-excluded \
   "$SRC/" "$CACHE/$TARGET/"
 cp "$MARKET_ROOT/marketplace.json" "$CACHE/marketplace.json"
+
+# Never let a real key leave the machine through the marketplace snapshot.
+if grep -rlE 'sk-[0-9a-fA-F]{32,}' "$CACHE/$TARGET" >/dev/null 2>&1; then
+  echo "ERROR: real API key found under $CACHE/$TARGET — refusing to publish." >&2
+  exit 1
+fi
 
 echo "published $TARGET (v$VERSION) -> marketplace snapshot"
 echo "next: Settings → Plugin Management → Discover → update the plugin, then start a new session."
