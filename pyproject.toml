@@ -1,6 +1,6 @@
 [project]
 name = "pdog-image-mcp"
-version = "1.3.4"
+version = "1.3.6"
 description = "Pdog GPT Image 2.5 image generation/editing MCP server (engine extracted from the pdog-gpt-image2 skill)"
 requires-python = ">=3.10"
 dependencies = [

@@ -238,8 +238,9 @@ def _build_request(
 
 
 async def _generate_impl(req: GenRequest, wait_seconds: float) -> dict[str, Any]:
-    config = load_config()
+    config: Optional[dict[str, Any]] = None
     try:
+        config = load_config()
         if req.dry_run:
             return await asyncio.to_thread(run_generation, req, config)
         # Pre-flight: parameter and cost-guard errors fail synchronously, before
@@ -377,8 +378,9 @@ async def pdog_task_status(
     wait_seconds（≤25）内可阻塞等待完成。running=继续轮询（任务已计费，切勿重复提交）；
     完成时返回文件路径与实际像素尺寸；failed 时返回原因与建议。
     """
-    config = load_config()
+    config: Optional[dict[str, Any]] = None
     try:
+        config = load_config()
         job = _job_snapshot(task_id)
         if job is not None:
             return await _await_job(task_id, wait_seconds)
