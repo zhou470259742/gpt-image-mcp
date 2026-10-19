@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "pdog-image",
-      "version": "1.3.6",
+      "version": "1.4.0",
       "description": "多路由图像生成/编辑 MCP：按档位分地址与 Key、生成与编辑独立模型、主备路由自动兜底。",
       "description_i18n": {
         "zh-CN": "多路由图像生成/编辑 MCP：按档位分地址与 Key、生成与编辑独立模型、主备路由自动兜底；附 pdog_generate/pdog_edit/pdog_task_status/pdog_verify_transparency/pdog_chroma_key 工具与判断层技能。",

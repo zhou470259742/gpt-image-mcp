@@ -15,6 +15,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from .core import (
     FOUR_K_SIZES,
@@ -28,7 +29,9 @@ from .core import (
     PdogError,
     GenRequest,
     collect_async_result,
+    config_secret_values,
     load_config,
+    mask_key,
     run_generation,
 )
 
@@ -39,6 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Generate or edit images with Pdog (GPT Image 2.5 default, GPT Image 2 compatible).",
     )
     parser.add_argument("--prompt", help="Prompt describing image generation or edit instructions.")
+    parser.add_argument(
+        "--prompt-file", type=Path, default=None, metavar="PATH",
+        help="Read the prompt from a UTF-8 file instead of --prompt. Use this whenever the "
+             "prompt contains quotes, $, backticks, or other shell metacharacters.",
+    )
     parser.add_argument(
         "--model", choices=VALID_MODELS, default="auto",
         help="'auto' (default; generation->flare, edit->sunburst), flare, sunburst, or image-2.",
@@ -82,20 +90,50 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _read_prompt(args: argparse.Namespace) -> str:
+    """Resolve the prompt from --prompt or --prompt-file, enforcing exactly one."""
+    if args.prompt and args.prompt_file:
+        raise PdogError(
+            "Pass either --prompt or --prompt-file, not both.",
+            kind="invalid_parameter",
+        )
+    if args.prompt_file:
+        try:
+            text = args.prompt_file.expanduser().read_text(encoding="utf-8")
+        except OSError as exc:
+            raise PdogError(
+                f"Could not read prompt file {args.prompt_file}: {exc}",
+                kind="invalid_parameter",
+            ) from exc
+        if text.startswith("\ufeff"):
+            text = text[1:]
+        return text.strip()
+    return (args.prompt or "").strip()
+
+
+def _sanitize(text: str, config: dict[str, Any]) -> str:
+    for secret in config_secret_values(config):
+        if secret:
+            text = text.replace(secret, mask_key(secret))
+    return text
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    config = load_config(args.config)
 
+    config: dict[str, Any] = {}
     try:
+        config = load_config(args.config)
         if args.task_status:
             result = collect_async_result(config, args.task_status, None, wait_seconds=args.wait)
         else:
-            if not args.prompt or not args.prompt.strip():
+            prompt = _read_prompt(args)
+            if not prompt:
                 raise PdogError("Prompt must not be empty.", kind="invalid_parameter")
             # CLI usage is inherently explicit (parity with the skill script),
             # so any 4K tier reached from the command line is allowed.
             request = GenRequest(
-                prompt=args.prompt,
+                prompt=prompt,
                 images=list(args.image or []),
                 mask=args.mask,
                 size=args.size,
@@ -124,7 +162,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             result = run_generation(request, config)
     except PdogError as exc:
-        print(json.dumps({"ok": False, "error": exc.to_dict()}, ensure_ascii=False, indent=2),
+        payload = exc.to_dict()
+        payload["message"] = _sanitize(str(payload.get("message", "")), config)
+        print(json.dumps({"ok": False, "error": payload}, ensure_ascii=False, indent=2),
               file=sys.stderr)
         return 1
 

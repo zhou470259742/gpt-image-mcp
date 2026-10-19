@@ -225,3 +225,36 @@ def test_cli_dry_run_stdout_is_clean_json():
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["ok"] and payload["preview"]["tier"] == "1k"
+
+
+def test_cli_prompt_file_preserves_shell_metacharacters(tmp_path):
+    """A prompt file must survive quotes, $, backticks and pipes verbatim."""
+    import subprocess
+
+    prompt = 'A sign reading "SALE 50%" with $HOME and `whoami` | piped > text'
+    src = tmp_path / "prompt.txt"
+    src.write_text(prompt, encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "pdog_image_mcp.cli",
+         "--dry-run", "--prompt-file", str(src)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["preview"]["payload"]["prompt"] == prompt
+
+
+def test_cli_rejects_prompt_and_prompt_file_together(tmp_path):
+    import subprocess
+
+    src = tmp_path / "prompt.txt"
+    src.write_text("x", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pdog_image_mcp.cli", "--dry-run",
+         "--prompt", "a", "--prompt-file", str(src)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stderr)["error"]
+    assert error["kind"] == "invalid_parameter"

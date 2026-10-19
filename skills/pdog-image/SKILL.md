@@ -53,3 +53,19 @@ description: 使用 Pdog GPT Image 2.5 生成或编辑图片（文生图、参�
 - 图像字节 100% 透传上游；色键转换只做"色键转 Alpha + 去色边"，严禁缩放。
 - 400/401/402/404 立即报告原因不重试；502/503/504 脚本自动退避重试；等待任务时只轮询、绝不重复提交付费任务。
 - 请求超时不会自动切换备用路由（可能已计费）；遇到超时先向用户确认，再决定是否重试。
+
+## 没有 MCP 时的降级路径（CLI）
+
+MCP 工具不可用、或目标客户端不支持 MCP 时，用同引擎的 CLI（参数一一对应，输出同样的结构化 JSON）：
+
+```bash
+# 提示词务必写入文件：内联会丢引号、被 shell 展开
+printf '%s' "$PROMPT" > /tmp/pdog-prompt.txt
+uv run --project <插件目录> --extra chroma pdog-image \
+  --prompt-file /tmp/pdog-prompt.txt --size 2048x1152 --output out.png
+```
+
+- **必须用 `--prompt-file`，不要用 `--prompt`**：提示词里的 `"`、`` ` ``、`$`、`|`、`>` 会在 shell 层被截断或展开，且**不会报错**——生成的图内容不对但调用显示成功。
+- 编辑模式加 `--image <路径>`（可多次）；透明走 `--transparent-strategy chroma-key --key-color "#00FF00"`；4K 加 `--4k`。
+- 退出码 0=成功，1=失败；失败时 stderr 是 `{"ok": false, "error": {...}}`，按 `kind` 处理。
+- CLI 没有 `job_` 概念，`--task-status <上游 task_id>` 用于续查异步任务。**job_id 不能跨进程使用**。

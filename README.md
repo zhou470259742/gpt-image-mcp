@@ -45,8 +45,16 @@ Resources：`pdog://docs/api-spec`、`pdog://docs/sizes`、`pdog://docs/errors`�
 
 ## 安装
 
-前置：[uv](https://docs.astral.sh/uv/)（`uv --version` 自检）。安装插件本身不需要先装 uv，
-但**首次启动 MCP 时**会用它自动创建环境并安装依赖（含色键），所以目标机最终必须有 uv。
+**不需要预先安装 uv。** 首次启动 MCP 时，`scripts/launch-mcp.sh` 会探测 PATH、`~/.local/bin`、
+`/opt/homebrew/bin`、`/usr/local/bin`、`~/.cargo/bin`；都没有就**自动下载并运行官方安装脚本**
+（https://astral.sh/uv/install.sh），然后继续启动并装依赖（含色键）。想关掉自动安装：
+
+```bash
+export PDOG_NO_AUTO_UV=1   # 启动脚本改为直接报错并给出安装指引
+```
+
+自动安装发生在插件自己拉起进程时，日志走 stderr（`[pdog-image]` 前缀）。若公司网络需要代理，
+设置 `ZCODE_HTTP_PROXY`，启动脚本会同时用于下载安装脚本。
 
 **方式 A — 用 Git 地址添加市场（给别人分发用这个）**：设置 → 插件管理 → 发现 → 「+」，
 选择 **Git / GitHub 仓库**，填：
@@ -82,13 +90,32 @@ https://github.com/zhou470259742/gpt-image-mcp
 
 **方式 C — 任意其他 MCP 客户端**：同上的 `command/args` 形式接入 stdio。
 
+**方式 D — 不用 MCP，直接命令行**：同一引擎的 CLI，适合一次性脚本或不支持 MCP 的客户端。
+
+```bash
+# 提示词写文件，避免 shell 吞掉引号 / 展开 $ 和反引号
+printf '%s' 'A sign reading "SALE 50%"' > /tmp/p.txt
+uv run --project . --extra chroma pdog-image --prompt-file /tmp/p.txt \
+  --size 2048x1152 --output out.png
+
+# 编辑 / 透明 / 4K / 续查异步任务
+uv run --project . --extra chroma pdog-image --prompt-file /tmp/p.txt --image ref.png
+uv run --project . --extra chroma pdog-image --prompt-file /tmp/p.txt \
+  --background transparent --transparent-strategy chroma-key --key-color "#00FF00"
+uv run --project . --extra chroma pdog-image --prompt-file /tmp/p.txt --4k
+uv run --project . --extra chroma pdog-image --task-status <task_id> --wait 30
+```
+
+成功时 stdout 是结构化 JSON、退出码 0；失败时 stderr 是 `{"ok": false, "error": {...}}`、退出码 1。
+**`--prompt` 只适合极短且不含特殊字符的提示词**，其余一律用 `--prompt-file`。
+
 ## 可移植性（移动位置 / 发给别人）
 
 - **插件内零绝对路径**：MCP 启动声明在根级 `.mcp.json`，使用 `${CLAUDE_PLUGIN_ROOT}`
   变量（与官方 android-emulator 插件同款机制）——插件装到哪，根目录解析到哪；
   移动目录、换机器、通过 marketplace（本地目录/Git）分发都不会失效。
-- **分发前提**：目标机器装有 [uv](https://docs.astral.sh/uv/)（首次连接时 `uv run`
-  会按 `pyproject.toml` 自动构建环境）；密钥用 `PDOG_API_KEY_*` 环境变量或目标机的
+- **分发前提**：首次连接时会自动安装 uv（可用 `PDOG_NO_AUTO_UV=1` 关闭），
+  再按 `pyproject.toml` 自动构建环境、装色键依赖；密钥用 `PDOG_API_KEY_*` 环境变量或目标机的
   config.json 提供，包内不含任何密钥。
 - 方式 B 中的绝对路径只是"本机用户级注册"的示例，属于用户自己的配置，不随插件分发。
 
