@@ -43,16 +43,30 @@ Resources：`pdog://docs/api-spec`、`pdog://docs/sizes`、`pdog://docs/errors`�
 
 返回值为结构化 JSON：`files[].path/width/height`、`actual_size`（上游实返尺寸，**可能与请求不符，交付时如实转述**）、`model`、`tier`、`transport`、`transparency_check`。错误统一 `{"ok": false, "error": {kind, message, hint}}`，kind 含 `cost_guard` / `invalid_parameter` / `http` / `network` / `upstream` / `config`。
 
-## 安装（本机）
+## 安装
 
-前置：[uv](https://docs.astral.sh/uv/)（`uv --version` 自检）。
+前置：[uv](https://docs.astral.sh/uv/)（`uv --version` 自检）。安装插件本身不需要先装 uv，
+但**首次启动 MCP 时**会用它自动创建环境并安装依赖（含色键），所以目标机最终必须有 uv。
 
-**方式 A — 作为 ZCode 插件（推荐）**：设置 → 插件管理 → 发现 → 「+」添加本地目录，
-选择本仓库根目录。安装后每次会话自动连接 MCP、技能自动可触发。
-密钥从 `~/.pdog-image/config.json` 读取（见下文「配置与密钥」）。
+**方式 A — 用 Git 地址添加市场（给别人分发用这个）**：设置 → 插件管理 → 发现 → 「+」，
+选择 **Git / GitHub 仓库**，填：
 
-**方式 A2 — 通过本地插件市场**：把一个包含 `marketplace.json` 的目录添加为市场，
+```
+https://github.com/zhou470259742/gpt-image-mcp
+```
+
+仓库根目录的 `marketplace.json` 就是市场清单，`plugins[].source` 为 `./`，即插件本体在仓库根。
+添加市场后在发现页点 `pdog-image` 的 **Get** 即可；后续更新走同一个入口。
+对方机器上**不需要**提前下载仓库，ZCode 会自行 clone。
+
+**方式 A2 — 本地目录市场**：把一个包含 `marketplace.json` 的目录添加为市场，
 即可在发现页列表中安装/更新 `pdog-image`；往市场清单里继续加插件条目即可扩展。
+
+**方式 A3 — 直接装插件目录**：设置 → 插件管理 → 发现 → 「+」添加本地目录，
+选择本仓库根目录。适合自己开发调试。
+
+安装后密钥放 `~/.pdog-image/config.json`（见下文「配置与密钥」），**不需要重新安装**——
+配置与代码分离，改 Key、加路由都不用升级插件。
 
 **方式 B — 仅注册 MCP**：在 `~/.zcode/cli/config.json` 的 `mcp.servers` 加入
 （把路径替换为本仓库在你机器上的实际位置）：
@@ -61,7 +75,7 @@ Resources：`pdog://docs/api-spec`、`pdog://docs/sizes`、`pdog://docs/errors`�
 {
   "pdog-image": {
     "command": "uv",
-    "args": ["run", "--project", "/path/to/pdog-image2-mcp", "pdog-image-mcp"]
+    "args": ["run", "--project", "/path/to/pdog-image2-mcp", "--extra", "chroma", "pdog-image-mcp"]
   }
 }
 ```
