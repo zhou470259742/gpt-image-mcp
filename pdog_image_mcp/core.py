@@ -940,16 +940,26 @@ def poll_async_status_once(base_url: str, api_key: str, task_id: str) -> dict[st
             raw = response.read()
     except HTTPError as exc:
         raise PdogError(
-            f"Async poll returned HTTP {exc.code}: {response_message(exc.read())}",
+            f"Async poll for task {task_id} returned HTTP {exc.code}: "
+            f"{response_message(exc.read())}",
             kind="http",
             http_status=exc.code,
+            hint=f"任务已提交并计费，稍后用 pdog_task_status(task_id='{task_id}') 继续查询，切勿重复提交。",
         ) from exc
     except (URLError, TimeoutError, socket.timeout) as exc:
-        raise PdogError(f"Async poll network error: {exc}", kind="network") from exc
+        raise PdogError(
+            f"Async poll for task {task_id} hit a network error: {exc}",
+            kind="network",
+            hint=f"任务已提交并计费，稍后用 pdog_task_status(task_id='{task_id}') 继续查询，切勿重复提交。",
+        ) from exc
     try:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PdogError(f"Invalid JSON from async poll: {raw[:200]!r}", kind="upstream") from exc
+        raise PdogError(
+            f"Invalid JSON from async poll for task {task_id}: {raw[:200]!r}",
+            kind="upstream",
+            hint=f"任务已提交并计费，稍后用 pdog_task_status(task_id='{task_id}') 继续查询。",
+        ) from exc
 
 
 def _task_image_urls(body: dict[str, Any]) -> List[str]:
@@ -1020,11 +1030,23 @@ def poll_async_task(
                 json.dumps(error, ensure_ascii=False) if error else json.dumps(body, ensure_ascii=False)[:300]
             )
             hint = None
-            if "model_not_found" in error_text or "not supported" in error_text.lower():
+            lowered = error_text.lower()
+            if "model_not_found" in error_text or "not supported" in lowered:
                 hint = (
                     "网关异步工作组未配置该模型；本网关 4K 账户组当前对 2.5 模型族"
                     "（flare/sunburst）同步与异步均返回 model_not_found，"
                     "可尝试 model='image-2' 或联系服务商确认账户组配置。"
+                )
+            elif "no available compatible accounts" in lowered:
+                hint = (
+                    "网关侧该档位账户组暂时没有可用资源（不是本地配置或参数错误）。"
+                    "稍后重试，或联系服务商确认 4K 档账户组是否在线；"
+                    "也可先用 1K/2K 档出图，稍后再补 4K。"
+                )
+            elif "内容政策" in error_text or "content policy" in lowered:
+                hint = (
+                    "上游内容审核拒绝了该提示词。换更中性的描述重试；"
+                    "若中性提示词也被拒，多为该账户组审核策略问题，需联系服务商。"
                 )
             raise PdogError(
                 f"Async task {task_id} failed: {error_text}",
