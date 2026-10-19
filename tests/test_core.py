@@ -379,6 +379,58 @@ def test_chroma_dry_run_prompt_append(tmp_path):
     assert "#FF00FF" in result["preview"]["payload"]["prompt"]
 
 
+def test_chroma_skips_conversion_when_upstream_has_alpha(tmp_path, monkeypatch):
+    """Upstream may ignore the key-color instruction and return real alpha."""
+    upstream = png_with_transparent_margin()
+    _stub_sync(core, monkeypatch, upstream)
+    out = tmp_path / "cut.png"
+    result = run_generation(
+        GenRequest(
+            prompt="抠图",
+            background="transparent",
+            transparent_strategy="chroma-key",
+            key_color="#00FF00",
+            output=str(out),
+        ),
+        FAKE_CONFIG,
+    )
+    assert result["ok"]
+    assert result["chroma"]["transparent_percent"] is None
+    assert result["files"][0]["bytes"] == len(upstream)
+    assert result["transparency_check"]["has_alpha"]
+
+
+def test_chroma_text_to_image_allows_explicit_key_color():
+    """An explicit key color needs no reference image; 'auto' still does."""
+    result = run_generation(
+        GenRequest(
+            prompt="A red apple",
+            background="transparent",
+            transparent_strategy="chroma-key",
+            key_color="#00FF00",
+            dry_run=True,
+        ),
+        FAKE_CONFIG,
+    )
+    assert "#00FF00" in result["preview"]["payload"]["prompt"]
+
+    try:
+        run_generation(
+            GenRequest(
+                prompt="A red apple",
+                background="transparent",
+                transparent_strategy="chroma-key",
+                key_color="auto",
+                dry_run=True,
+            ),
+            FAKE_CONFIG,
+        )
+    except PdogError as exc:
+        assert "key_color" in str(exc)
+    else:
+        raise AssertionError("auto key color without a reference image should fail")
+
+
 # --- 4K model_not_found auto-fallback to legacy image-2 ------------------------
 
 def _stub_4k_model_not_found(monkeypatch, image):

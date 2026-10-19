@@ -1161,41 +1161,56 @@ def _finalize_images(
         if chroma_mode and key_color is not None:
             from . import chroma as _chroma
 
-            try:
-                img_bytes, chroma_metrics = _chroma.extract_edge_connected_key(
-                    upstream_bytes,
-                    key_color,
-                    tolerance=req.chroma_tolerance,
-                    feather=req.chroma_feather,
-                    despill_distance=req.chroma_despill_distance,
-                    despill_radius=req.chroma_despill_radius,
+            # Some gateway/model combinations ignore the "paint a solid key color"
+            # instruction and return real alpha anyway. Re-keying that would fail
+            # (there is no key-colored background) and throw away a valid result.
+            if has_real_transparency(upstream_bytes):
+                chroma_metrics = {"key_color": _chroma.color_hex(key_color),
+                                  "transparent_percent": None,
+                                  "skipped": "upstream already returned real alpha"}
+                note = "chroma-key requested, upstream alpha used (no key conversion needed)"
+            else:
+                try:
+                    img_bytes, chroma_metrics = _chroma.extract_edge_connected_key(
+                        upstream_bytes,
+                        key_color,
+                        tolerance=req.chroma_tolerance,
+                        feather=req.chroma_feather,
+                        despill_distance=req.chroma_despill_distance,
+                        despill_radius=req.chroma_despill_radius,
+                    )
+                except PdogError:
+                    raise
+                except ValueError as exc:
+                    # The upstream render is already billed; keep it so the color key
+                    # can be retried with different parameters without paying again.
+                    keyed = out_path.with_name(f"{out_path.stem}-keyed{out_path.suffix or '.png'}")
+                    keyed.parent.mkdir(parents=True, exist_ok=True)
+                    keyed.write_bytes(upstream_bytes)
+                    raise PdogError(
+                        f"Dynamic chroma-key transparency failed: {exc}",
+                        kind="upstream",
+                        hint=(
+                            f"已生成的色键原图已保存到 {keyed}，不会浪费；"
+                            "可用 pdog_chroma_key 对该图调整 tolerance/key_color 重试，无需重新生成。"
+                        ),
+                    ) from exc
+                note = (
+                    f"chroma-key #{'%02X%02X%02X' % key_color}, "
+                    f"transparent {chroma_metrics['transparent_percent']}%, no resize"
                 )
-            except PdogError:
-                raise
-            except ValueError as exc:
-                raise PdogError(
-                    f"Dynamic chroma-key transparency failed: {exc}",
-                    kind="upstream",
-                    hint=(
-                        "已生成的色键原图不会浪费：可用 pdog_chroma_key 对已保存的 -keyed 图像"
-                        "调整参数重试，无需重新生成。"
-                    ),
-                ) from exc
-            note = (
-                f"chroma-key #{'%02X%02X%02X' % key_color}, "
-                f"transparent {chroma_metrics['transparent_percent']}%, no resize"
-            )
         elif transparent_requested and not has_real_transparency(upstream_bytes):
             rejected = out_path.with_name(f"{out_path.stem}-noalpha{out_path.suffix or '.png'}")
             rejected.parent.mkdir(parents=True, exist_ok=True)
             rejected.write_bytes(upstream_bytes)
             raise PdogError(
                 "Transparent output requested, but upstream returned no real transparent pixels. "
-                "Native transparency is required by auto/native mode; the result was rejected.",
+                "This gateway does not emit native alpha; auto/native mode cannot succeed here.",
                 kind="upstream",
                 hint=(
                     f"上游原图已保存到 {rejected} 以免浪费已扣费产出；"
-                    "如接受色键回退，请显式使用 transparent_strategy='chroma-key'。"
+                    "要拿到透明图，请改用 transparent_strategy='chroma-key' 并显式指定 "
+                    "key_color（如 '#00FF00'），同时让提示词写出同色纯背景。"
                 ),
             )
 
@@ -1252,14 +1267,23 @@ class _JobOutcome:
     pending_status: Optional[str] = None
 
 
-def _resolve_chroma_key(req: GenRequest, first_image_bytes: bytes) -> Tuple[Tuple[int, int, int], dict]:
+def _resolve_chroma_key(
+    req: GenRequest, first_image_bytes: Optional[bytes]
+) -> Tuple[Tuple[int, int, int], dict]:
     from . import chroma as _chroma
 
     _chroma._require_available()
-    if req.key_color == "auto":
-        return _chroma.choose_key_color(first_image_bytes)
-    color = _chroma.parse_hex_color(req.key_color)
-    return color, {"selected": _chroma.color_hex(color), "scores": None}
+    if req.key_color != "auto":
+        color = _chroma.parse_hex_color(req.key_color)
+        return color, {"selected": _chroma.color_hex(color), "scores": None}
+    if first_image_bytes is None:
+        raise PdogError(
+            "transparent_strategy='chroma-key' with key_color='auto' needs a reference "
+            "image to sample the background. Pass an explicit key_color (for example "
+            "'#00FF00') for text-to-image, or use a reference image.",
+            kind="invalid_parameter",
+        )
+    return _chroma.choose_key_color(first_image_bytes)
 
 
 def run_generation(
@@ -1340,12 +1364,9 @@ def run_generation(
     key_color: Optional[Tuple[int, int, int]] = None
     key_details: Optional[dict] = None
     if chroma_mode:
-        if not images:
-            raise PdogError(
-                "Dynamic chroma-key transparency requires at least one reference image.",
-                kind="invalid_parameter",
-            )
-        key_color, key_details = _resolve_chroma_key(req, images[0][2])
+        key_color, key_details = _resolve_chroma_key(
+            req, images[0][2] if images else None
+        )
         key_hex = "#%02X%02X%02X" % key_color
         payload["prompt"] = (
             payload["prompt"]

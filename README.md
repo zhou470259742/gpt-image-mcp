@@ -183,7 +183,7 @@ RUN_LIVE=1 uv run pytest tests/test_live_api.py -q -s     # 真实 API（约 ¥0
 
 - 编辑默认只传 images + prompt；不自制、不推断 mask，不自动追加第二次调用。
 - 4K 仅显性请求 + `allow_4k=true`；伪 4K（≤2048 最大边走 4K 路由）直接拒绝。
-- 透明背景默认要求原生 Alpha，上游无透明像素即判失败；色键仅为显式回退，转换不缩放。
+- 透明背景：安装版启动脚本已带 `--extra chroma`，色键可直接用。网关实测**不出原生 Alpha**，所以 `transparent` 请求会先按原生路线尝试，失败时把原图存成 `-noalpha.png` 并报错；要真正拿到透明图，用 `transparent_strategy='chroma-key'`。文生图用色键时必须显式给 `key_color`（如 `#00FF00`），`auto` 需要参考图来取背景色。转换不缩放。
 - 异步任务已计费：超时返回 `task_id`，只轮询不重提（`pdog_task_status`）。
 - 400/401/402/404 不重试；502/503/504 指数退避最多 2 次。
 - DoH Fake-IP 兜底 + 无 SNI 连接强制证书校验（CA 链 + SAN），校验失败立即中止。

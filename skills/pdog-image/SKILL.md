@@ -43,7 +43,7 @@ description: 使用 Pdog GPT Image 2.5 生成或编辑图片（文生图、参�
 ## 透明素材验收
 
 1. 交付前必跑 `pdog_verify_transparency`：`fail`（实质轮廓 alpha≥16 碰边）→ 重新生成；`review`（软边）→ 汇报 softEdgeContact 并在棋盘格/白底/黑底人工复核；`pass` → 交付。
-2. 正式装饰素材必须原生 Alpha（默认路线）；色键仅当用户显式接受回退时使用，交付说明必须写明经过色键转换。
+2. 本网关实测不出原生 Alpha：`background='transparent'` 会失败并把原图存成 `-noalpha.png`。要交付透明素材，直接走 `transparent_strategy='chroma-key'`；文生图必须显式给 `key_color`（`auto` 需要参考图取色），交付说明写明经过色键转换。
 3. 修复旧色键素材时，重做请求不得再上传旧色键图作参考（模型会继承残留色），应回到干净原始资产。
 
 ## 交付规范（Zero-Tampering）

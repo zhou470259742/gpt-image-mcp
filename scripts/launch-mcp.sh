@@ -27,4 +27,7 @@ if [ -z "$UV" ]; then
   exit 127
 fi
 
-exec "$UV" run --project "$ROOT" pdog-image-mcp
+# --extra chroma installs the color-key engine on first launch. Native
+# transparency is rejected by this gateway, so chroma-key is the only route to
+# transparent output; without the extra that tool fails at runtime.
+exec "$UV" run --project "$ROOT" --extra chroma pdog-image-mcp
