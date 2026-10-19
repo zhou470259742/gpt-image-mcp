@@ -142,7 +142,10 @@ def load_config(explicit: str | os.PathLike | None = None) -> dict[str, Any]:
         raise PdogError(
             f"No Pdog configuration found (searched: {searched}).",
             kind="config",
-            hint="Copy config.example.json to config.json and fill in your keys.",
+            hint=(
+                f"Run `{Path(__file__).resolve().parents[1] / 'scripts' / 'setup-config.sh'}` "
+                "or copy config.example.json to ~/.pdog-image/config.json and fill in your keys."
+            ),
         )
 
     # A routes-based config carries its own base_url/model per route, so the

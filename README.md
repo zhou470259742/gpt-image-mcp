@@ -112,10 +112,15 @@ ZCode 的 directory 类市场在**添加时会把清单与插件内容快照**�
 
 优先级：环境变量 > 显式路径（`$PDOG_CONFIG`）> **用户级 `~/.pdog-image/config.json`**（推荐的本机密钥存放处，跨插件更新/市场快照刷新稳定）> `<插件目录>/config.json` > 旧技能目录（已废弃）。
 
-已安装插件（缓存副本）建议把密钥放用户级位置：
+已安装插件（缓存副本）建议把密钥放用户级位置。二选一：
+
 ```bash
+./scripts/setup-config.sh          # 交互式，Key 输入不回显；写入 ~/.pdog-image/config.json (600)
+# 或手动：
 mkdir -p ~/.pdog-image && cp config.example.json ~/.pdog-image/config.json  # 填入真实 Key
 ```
+
+不配 Key 时工具仍能启动，但调用会返回 `No Pdog configuration found` 和查找过的路径。
 
 ### 多路由配置（推荐）
 
